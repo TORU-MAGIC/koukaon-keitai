@@ -21,6 +21,8 @@
       <div class="statusline"><span id="connectionDot" class="dot"></span><strong id="connectionStatus">コントローラーを待っています</strong></div>
       <p id="statusHelp">iPhoneの設定でBluetoothコントローラーを接続し、この画面を開いたままボタンを押してください。</p>
       <div class="button-row"><button id="enableAudio" class="primary">音を準備する</button><button id="scanButton" class="secondary">接続を確認</button></div>
+      <label class="keyboard-label" for="keyboardCapture">キーボード型リモコンの入力欄</label>
+      <input id="keyboardCapture" class="keyboard-capture" type="text" inputmode="none" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="タップしてからリモコンのボタンを押す" aria-label="リモコンのキー入力を受け取る欄">
       <div class="last-input"><span>最後に受信した入力</span><strong id="lastInput">まだ入力はありません</strong></div>
     </section>
     <section class="effects-head"><div><p class="eyebrow">SOUND BOARD</p><h2>効果音</h2></div><button id="stopAll" class="stop" disabled>■ 全停止</button></section>
@@ -33,7 +35,7 @@
         <li>登録したい効果音の「ボタン登録」を押し、コントローラーのボタンを押します。</li>
         <li>入力が届くと「最後に受信した入力」に表示され、そのボタンで効果音が鳴ります。</li>
       </ol>
-      <p>ゲームパッド入力とキーボード入力を自動検出します。iPhoneの音量・再生ボタンはiOSが扱うため、アプリに届かない機種があります。ボタン入力が見つからない場合は、画面の「接続を確認」を押してからコントローラーを押してください。</p>
+      <p>ゲームパッド入力とキーボード入力に対応します。ページ送り・矢印キー型リモコンは、上の入力欄をタップしてフォーカスを当ててから登録してください。iPhoneの音量・再生ボタンはiOSが扱うため、アプリでは取得できません。通常のキーボードキーを送るリモコンか、Safariがゲームパッドとして認識するコントローラーをご使用ください。</p>
       <p>ホーム画面へ追加する場合はSafariの共有メニューから「ホーム画面に追加」を選びます。使用中はSafariを前面に保ってください。</p>
     </details>
   </main>

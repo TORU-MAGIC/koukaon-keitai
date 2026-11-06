@@ -1,4 +1,4 @@
-const CACHE='effect-remote-v1';
+const CACHE='effect-remote-v2';
 const FILES=['./','./index.html','./style.css','./app.js','./manifest.webmanifest','./sound-effects/sfx_correct_pingpong.wav','./sound-effects/sfx_wrong_buzzer.wav','./sound-effects/sfx_magic_sparkle_reveal.wav','./sound-effects/sfx_magic_whoosh_appear.wav','./sound-effects/sfx_magic_vanish_poof.wav','./sound-effects/sfx_magic_tada_sting.wav'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
