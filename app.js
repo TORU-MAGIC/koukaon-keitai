@@ -6,7 +6,12 @@
     {name:'キラキラ',file:'sfx_magic_sparkle_reveal.wav'},
     {name:'出現',file:'sfx_magic_whoosh_appear.wav'},
     {name:'消失',file:'sfx_magic_vanish_poof.wav'},
-    {name:'ジャーン',file:'sfx_magic_tada_sting.wav'}
+    {name:'ジャーン',file:'sfx_magic_tada_sting.wav'},
+    {name:'シャキーン',file:'sfx_shakiin.mp3'},
+    {name:'テレレレッテレー',file:'sfx_tetererettelei.mp3'},
+    {name:'ピューイーン',file:'sfx_pyuiin.mp3'},
+    {name:'ルービックキューブがそろう',file:'sfx_rubik_complete.wav'},
+    {name:'大砲',file:'sfx_cannon.wav'}
   ].map(x=>({...x, binding:null, audio:new Audio(`./sound-effects/${x.file}`)}));
   const storageKey='magic-show-cue.iphone-remote.v1';
   const $=s=>document.querySelector(s);
