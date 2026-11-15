@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101820">
+  <title>かんたん効果音リモコン</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101820; color: #f5f7fa; }
+    * { box-sizing: border-box; }
+    body { max-width: 760px; margin: 0 auto; padding: 18px 14px calc(90px + env(safe-area-inset-bottom)); }
+    h1 { margin: 0 0 6px; font-size: 26px; }
+    p { color: #bac6d2; }
+    button, select, input { min-height: 48px; border: 0; border-radius: 10px; font: inherit; }
+    button { padding: 10px 15px; background: #293947; color: white; font-weight: 700; touch-action: manipulation; }
+    button:disabled { opacity: .45; }
+    input { display: block; width: 100%; margin-top: 6px; padding: 10px 12px; border: 1px solid #557080; background: #0d141a; color: white; font-size: 16px; }
+    input:focus { outline: 3px solid #42c6cc; }
+    .top { position: sticky; top: 0; z-index: 2; margin: -18px -14px 14px; padding: 14px; background: #101820f2; border-bottom: 1px solid #31404d; }
+    .status { margin: 8px 0; color: #8de0bb; font-weight: 700; }
+    .help { margin: 8px 0 0; font-size: 13px; line-height: 1.55; }
+    .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 10px 0; padding: 12px; border: 1px solid #31404d; border-radius: 12px; background: #19242e; }
+    .row h2 { margin: 0 0 4px; font-size: 17px; }
+    .key { color: #ffd37b; font-size: 14px; }
+    .sound-picker { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 6px; }
+    .sound-picker label { grid-column: 1 / -1; color: #bac6d2; font-size: 13px; }
+    .sound-picker select { width: 100%; min-width: 0; padding: 0 8px; border: 1px solid #557080; background: #0d141a; color: #f5f7fa; font-size: 16px; }
+    .sound-picker .open-file { padding-inline: 10px; font-size: 14px; }
+    .sound-picker input[hidden] { display: none; }
+    .actions { display: flex; gap: 6px; }
+    .learn { background: #176d73; }
+    .play { min-width: 84px; background: #27845b; }
+    #stop { position: fixed; z-index: 3; right: 14px; bottom: max(14px, env(safe-area-inset-bottom)); background: #a33e45; box-shadow: 0 4px 18px #0008; }
+    #stop:disabled { display: none; }
+    @media (max-width: 430px) { .row { grid-template-columns: 1fr; } .actions button { flex: 1; } }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <h1>効果音リモコン</h1>
+    <button id="prepare" type="button">音を準備する</button>
+    <button id="stop" type="button" disabled>全停止</button>
+    <div id="status" class="status" role="status" aria-live="polite">最初に「音を準備する」を押してください</div>
+    <p id="last" class="help">最後の入力：なし</p>
+    <label for="capture" class="help">リモコン入力（キー登録後、ここにフォーカスがある状態で押します）</label>
+    <input id="capture" type="text" inputmode="none" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="リモコン入力テスト">
+    <p class="help">「キー登録」→リモコンのボタンを押します。音量ボタンはiPhoneが処理するため登録できません。</p>
+  </header>
+  <main id="list" aria-label="効果音"></main>
+
+  <script>
+    (() => {
+      const builtIns = [
+        ["ピンポーン", "sfx_correct_pingpong.wav"],
+        ["ブザー", "sfx_wrong_buzzer.wav"],
+        ["キラキラ", "sfx_magic_sparkle_reveal.wav"],
+        ["出現", "sfx_magic_whoosh_appear.wav"],
+        ["消失", "sfx_magic_vanish_poof.wav"],
+        ["ジャーン", "sfx_magic_tada_sting.wav"]
+      ];
+      const library = new Map(builtIns.concat([["マリオ効果音","マリオ効果音.wav"],["fanfere","fanfere.mp3"],["シャキーン","シャキーン.mp3"],["テレレレッテレー","テレレレッテレー.mp3"],["ピューイーン","ピューイーン.mp3"],["ルービックキューブがそろう","ルービックキューブがそろう.wav"],["銃","銃.wav"],["大砲","大砲.wav"]]).map(([name, file]) => [
+        file, { name, url: `./sound-effects/${encodeURIComponent(file)}`, bufferPromise: null }
+      ]));
+      const effects = builtIns.map(([name, file]) => ({
+        name, key: "", file, sound: library.get(file), source: null, requestId: 0, selectionId: 0
+      }));
+      const sourceStorageKey = "magic-show-cue.effect-remote-simple.sources.v1";
+      const storageKey = "magic-show-cue.effect-remote-simple.v1";
+      const list = document.querySelector("#list");
+      const status = document.querySelector("#status");
+      const last = document.querySelector("#last");
+      const capture = document.querySelector("#capture");
+      const stopButton = document.querySelector("#stop");
+      let learning = -1;
+      let learningTimer;
+      let audioContext;
+
+      try {
+        const saved = JSON.parse(localStorage.getItem(storageKey) || "[]");
+        effects.forEach((effect, i) => { effect.key = typeof saved[i] === "string" ? canonicalKey(saved[i]) : ""; });
+      } catch (_) {}
+
+      try {
+        const saved = JSON.parse(localStorage.getItem(sourceStorageKey) || "[]");
+        effects.forEach((effect, i) => {
+          if (!library.has(saved?.[i])) return;
+          effect.file = saved[i];
+          effect.sound = library.get(effect.file);
+        });
+      } catch (_) {}
+
+      function saveSources() {
+        try { localStorage.setItem(sourceStorageKey, JSON.stringify(effects.map((effect) => effect.file))); }
+        catch (_) {}
+      }
+      function save() { localStorage.setItem(storageKey, JSON.stringify(effects.map((effect) => effect.key))); }
+      function render() {
+        list.innerHTML = effects.map((effect, i) => `
+          <section class="row" data-index="${i}">
+            <div><h2>${effect.name}</h2><div class="key"></div></div>
+            <div class="actions">
+              <button class="learn" type="button">${learning === i ? "入力待ち…" : "キー登録"}</button>
+              <button class="play" type="button">再生</button>
+            </div>
+            <div class="sound-picker">
+              <label for="sound-${i}">音源を選ぶ</label>
+              <select id="sound-${i}" class="sound-select" aria-label="${effect.name}の音源"></select>
+              <button class="open-file" type="button" aria-label="${effect.name}の音声ファイルを選ぶ">ファイル…</button>
+              <input class="sound-file" type="file" accept=".wav,.mp3,audio/wav,audio/x-wav,audio/wave,audio/mpeg,audio/mp3" hidden>
+            </div>
+          </section>`).join("");
+        list.querySelectorAll(".key").forEach((label, i) => {
+          label.textContent = `キー：${effects[i].key || "未設定"}`;
+        });
+        list.querySelectorAll(".sound-select").forEach((select, i) => {
+          const effect = effects[i];
+          for (const [file, sound] of library) select.add(new Option(sound.name, file));
+          if (effect.sound.file) select.add(new Option(effect.sound.name, "custom"));
+          select.value = effect.sound.file ? "custom" : effect.file;
+        });
+      }
+      function canonicalKey(name) {
+        if (/^(PageUp|Prior)$/i.test(name)) return "PageUp";
+        if (/^(PageDown|Next)$/i.test(name)) return "PageDown";
+        return name;
+      }
+      function keyName(event) {
+        const key = event.key || "";
+        const code = event.code || "";
+        if (/^(Key[A-Z]|Digit[0-9]|Numpad\w+)$/i.test(code)) return code;
+        if (key === " " || key === "Spacebar") return "Space";
+        if (key && key !== "Unidentified") return canonicalKey(key);
+        if (code && code !== "Unidentified") return canonicalKey(code);
+        const legacyCode = event.keyCode || event.which;
+        if (legacyCode === 33) return "PageUp";
+        if (legacyCode === 34) return "PageDown";
+        return "不明";
+      }
+      function showInput(name) {
+        last.textContent = `最後の入力：${name}（${new Date().toLocaleTimeString("ja-JP")}）`;
+      }
+      function focusCapture() {
+        try { capture.focus({ preventScroll: true }); }
+        catch (_) { capture.focus(); }
+      }
+      function getAudioContext() {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) throw new Error("このブラウザでは効果音を再生できません");
+        audioContext ||= new AudioContextClass();
+        return audioContext;
+      }
+      async function enableAudio() {
+        const context = getAudioContext();
+        if (context.state !== "running") await context.resume();
+        return context;
+      }
+      function loadEffect(sound, context) {
+        if (!sound.bufferPromise) {
+          sound.bufferPromise = (async () => {
+            if (sound.file) return context.decodeAudioData(await sound.file.arrayBuffer());
+            const response = await fetch(sound.url);
+            if (!response.ok) throw new Error(`${sound.name}を読み込めません`);
+            return context.decodeAudioData(await response.arrayBuffer());
+          })().catch((error) => {
+            sound.bufferPromise = null;
+            throw error;
+          });
+        }
+        return sound.bufferPromise;
+      }
+      async function prepare() {
+        try {
+          const context = await enableAudio();
+          await Promise.all(effects.map((effect) => loadEffect(effect.sound, context)));
+          if (navigator.mediaSession) {
+            try {
+              if (window.MediaMetadata) navigator.mediaSession.metadata = new MediaMetadata({ title: "効果音リモコン", artist: "Magic Show Cue" });
+              navigator.mediaSession.playbackState = "playing";
+            } catch (_) {}
+          }
+          status.textContent = "準備完了。再生ボタンかリモコンを押してください";
+          focusCapture();
+        } catch (error) {
+          status.textContent = error.message || "音を準備できませんでした";
+        }
+      }
+      function stopEffect(effect) {
+        effect.requestId += 1;
+        const source = effect.source;
+        effect.source = null;
+        if (source) source.stop();
+      }
+      function updateStopButton() {
+        stopButton.disabled = effects.every((effect) => !effect.source);
+      }
+      async function play(index) {
+        const effect = effects[index];
+        stopEffect(effect);
+        const requestId = effect.requestId;
+        const sound = effect.sound;
+        stopButton.disabled = false;
+        try {
+          const context = await enableAudio();
+          const buffer = await loadEffect(sound, context);
+          if (effect.requestId !== requestId) return;
+          const source = context.createBufferSource();
+          source.buffer = buffer;
+          source.connect(context.destination);
+          source.onended = () => {
+            source.disconnect();
+            if (effect.source !== source) return;
+            effect.source = null;
+            updateStopButton();
+          };
+          source.start();
+          effect.source = source;
+          status.textContent = `再生中：${sound.name}`;
+        } catch (_) {
+          if (effect.requestId !== requestId) return;
+          updateStopButton();
+          status.textContent = "再生できません。画面の「音を準備する」を押してください";
+        }
+      }
+      function stopAll() {
+        effects.forEach(stopEffect);
+        updateStopButton();
+        status.textContent = "停止しました";
+      }
+      function receiveKey(name, repeat = false) {
+        showInput(name);
+        if (learning >= 0) {
+          if (["Shift", "Control", "Alt", "Meta"].includes(name)) return;
+          if (!name || name === "不明" || name === "Unidentified") {
+            status.textContent = "ボタン名を取得できません。キーボード入力を送るリモコンをお使いください";
+            return;
+          }
+          clearTimeout(learningTimer);
+          effects.forEach((effect, i) => {
+            if (i !== learning && effect.key.toLowerCase() === name.toLowerCase()) effect.key = "";
+          });
+          effects[learning].key = name;
+          learning = -1;
+          save();
+          render();
+          status.textContent = `${effects.find((effect) => effect.key === name).name} に「${name}」を登録しました`;
+          focusCapture();
+          return;
+        }
+        const index = effects.findIndex((effect) => effect.key && effect.key.toLowerCase() === name.toLowerCase());
+        if (index >= 0 && !repeat) play(index);
+      }
+      async function chooseFile(effect, file) {
+        const selectionId = ++effect.selectionId;
+        if (!/\.(wav|mp3)$/i.test(file.name) && !/^audio\/(wav|x-wav|wave|mpeg|mp3)$/i.test(file.type)) {
+          status.textContent = "WAVかMP3のファイルを選んでください";
+          return;
+        }
+        const sound = { name: file.name, file, bufferPromise: null };
+        status.textContent = `${file.name}を読み込んでいます`;
+        try {
+          await loadEffect(sound, getAudioContext());
+          if (effect.selectionId !== selectionId) return;
+          stopEffect(effect);
+          effect.sound = sound;
+          updateStopButton();
+          render();
+          status.textContent = `音源：${sound.name}`;
+        } catch (_) {
+          if (effect.selectionId !== selectionId) return;
+          status.textContent = `${file.name}を読み込めませんでした。音源を確認してください`;
+        }
+      }
+
+      list.addEventListener("change", (event) => {
+        const control = event.target;
+        const row = control.closest("[data-index]");
+        if (!row) return;
+        const effect = effects[Number(row.dataset.index)];
+        if (control.classList.contains("sound-select")) {
+          const sound = library.get(control.value);
+          if (!sound) return;
+          effect.selectionId += 1;
+          stopEffect(effect);
+          effect.file = control.value;
+          effect.sound = sound;
+          control.querySelector('option[value="custom"]')?.remove();
+          saveSources();
+          updateStopButton();
+          status.textContent = `音源：${sound.name}`;
+          focusCapture();
+        } else if (control.classList.contains("sound-file")) {
+          const file = control.files[0];
+          control.value = "";
+          if (file) chooseFile(effect, file);
+        }
+      });
+      list.addEventListener("click", (event) => {
+        const button = event.target.closest("button");
+        if (!button) return;
+        const row = button.closest("[data-index]");
+        const index = Number(row.dataset.index);
+        if (button.classList.contains("open-file")) {
+          row.querySelector(".sound-file").click();
+          return;
+        }
+        if (button.classList.contains("play")) play(index);
+        if (button.classList.contains("learn")) {
+          learning = index;
+          render();
+          status.textContent = `${effects[index].name} の登録待ちです。リモコンボタンを押してください`;
+          focusCapture();
+          clearTimeout(learningTimer);
+          learningTimer = setTimeout(() => {
+            if (learning !== index) return;
+            learning = -1;
+            render();
+            status.textContent = "入力を受信できませんでした。リモコンをiPhoneに接続し、キーボード入力を送る機種か確認してください";
+          }, 10000);
+        }
+      });
+      document.addEventListener("keydown", (event) => {
+        if (event.target instanceof Element && event.target.closest(".sound-select, .sound-file")) return;
+        const name = keyName(event);
+        if (learning >= 0) {
+          event.preventDefault();
+          receiveKey(name, event.repeat);
+          return;
+        }
+        const assigned = effects.some((effect) => effect.key && effect.key.toLowerCase() === name.toLowerCase());
+        if (assigned) event.preventDefault();
+        receiveKey(name, event.repeat);
+      }, true);
+      capture.addEventListener("input", () => { capture.value = ""; });
+      document.querySelector("#prepare").addEventListener("click", prepare);
+      stopButton.addEventListener("click", stopAll);
+      render();
+      if (navigator.mediaSession && navigator.mediaSession.setActionHandler) {
+        const mediaKeys = { play: "MediaPlayPause", pause: "MediaPlayPause", nexttrack: "MediaTrackNext", previoustrack: "MediaTrackPrevious" };
+        for (const [action, name] of Object.entries(mediaKeys)) {
+          try { navigator.mediaSession.setActionHandler(action, () => {
+            receiveKey(name);
+          }); } catch (_) {}
+        }
+      }
+    })();
+  </script>
+</body>
+</html>
