@@ -110,6 +110,25 @@ function Test-SameSubnet {
     return $true
 }
 
+function Get-InlineHashSources {
+    param(
+        [Parameter(Mandatory = $true)][string]$Html,
+        [Parameter(Mandatory = $true)][string]$Tag
+    )
+
+    # HTMLを直しても、CSPのハッシュが自動で追従する(ブラウザは改行をLFに正規化してから計算する)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $sources = New-Object System.Collections.Generic.List[string]
+    $pattern = "<$Tag(?:\s[^>]*)?>(.*?)</$Tag>"
+    foreach ($match in [regex]::Matches($Html, $pattern, "Singleline,IgnoreCase")) {
+        $text = $match.Groups[1].Value.Replace("`r`n", "`n")
+        $hash = [System.Convert]::ToBase64String($sha.ComputeHash($utf8NoBom.GetBytes($text)))
+        $sources.Add("'sha256-" + $hash + "'")
+    }
+    $sha.Dispose()
+    return ($sources -join " ")
+}
+
 function Get-ContentType {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -139,7 +158,7 @@ function Send-Response {
         "Cache-Control: no-store, no-cache, must-revalidate, max-age=0`r`n" +
         "Pragma: no-cache`r`n" +
         "Expires: 0`r`n" +
-        "Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-CQE2YgeOToxouu7SWTaVK54oj9FiYiDf8cYa5/VVNFs='; style-src 'self' 'sha256-jT0PwiFF8jjxYkNtHBA9ratXoUJHjpyTkw60brCczDU='; media-src 'self' blob:; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`r`n" +
+        "Content-Security-Policy: $cspHeaderValue`r`n" +
         "Cross-Origin-Resource-Policy: same-origin`r`n" +
         "Referrer-Policy: no-referrer`r`n" +
         "X-Content-Type-Options: nosniff`r`n" +
@@ -312,6 +331,8 @@ function Handle-Client {
             Send-TextResponse -Stream $stream -StatusCode 400 -Reason "Bad Request" `
                 -Message "Invalid URL encoding" -IncludeBody $includeBody
         }
+    } catch [System.IO.IOException] {
+        # iPhone Safariの空の予備接続・中断された接続。正常動作なので何も表示しない
     } catch {
         Write-Warning ("接続処理エラー: " + $_.Exception.Message)
     } finally {
@@ -350,8 +371,20 @@ if ($LocalOnly) {
         }
     }
 }
+
+$htmlPath = Join-Path $projectRoot "effect-remote-simple.html"
+if (-not [System.IO.File]::Exists($htmlPath)) {
+    throw "effect-remote-simple.html が見つかりません。このスクリプトと同じフォルダに置いてください。"
+}
+$htmlText = [System.IO.File]::ReadAllText($htmlPath, $utf8NoBom)
+$scriptSources = Get-InlineHashSources -Html $htmlText -Tag "script"
+$styleSources = Get-InlineHashSources -Html $htmlText -Tag "style"
+$cspHeaderValue = "default-src 'self'; script-src 'self' $scriptSources; style-src 'self' $styleSources; media-src 'self' blob:; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+
 $listener = [System.Net.Sockets.TcpListener]::new($binding.Address, $Port)
 $started = $false
+$pool = $null
+$workers = New-Object System.Collections.ArrayList
 
 try {
     $listener.Start()
@@ -367,6 +400,7 @@ try {
         Write-Host "スマホで使うには、PCをWi-Fi/LANへ接続して起動し直してください。" -ForegroundColor Yellow
     } else {
         Write-Host "iPhoneは同じWi-FiからSafariで開き、最初に「音を準備する」をタップしてください。" -ForegroundColor White
+        Write-Host "本番中は iPhone の「自動ロック」を「なし」にしておくと安心です。" -ForegroundColor White
     }
     Write-Host ""
     Write-Host ("接続先: {0} / {1}" -f $binding.InterfaceAlias, $binding.Address) -ForegroundColor DarkGray
@@ -395,9 +429,47 @@ try {
     }
 
     Write-Host ""
+
+    # 接続ごとに別スレッドで処理する。iPhone Safariは空の予備接続を張るため、
+    # 1接続ずつ順番に処理すると、その待ち(数秒)でページや音声の取得が止まってしまう。
+    $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    foreach ($functionName in @("Test-SameSubnet", "Get-ContentType", "Send-Response", "Send-TextResponse",
+                                "Test-PathHasReparsePoint", "Resolve-PublicFile", "Handle-Client")) {
+        $definition = (Get-Command -Name $functionName -CommandType Function).Definition
+        $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($functionName, $definition))
+    }
+    $sharedVariables = [ordered]@{
+        projectRoot = $projectRoot
+        projectRootWithSeparator = $projectRootWithSeparator
+        utf8NoBom = $utf8NoBom
+        headerEncoding = $headerEncoding
+        accessToken = $accessToken
+        publicFiles = $publicFiles
+        cspHeaderValue = $cspHeaderValue
+    }
+    foreach ($name in $sharedVariables.Keys) {
+        $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new($name, $sharedVariables[$name], $null))
+    }
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 16, $iss, $Host)
+    $pool.Open()
+
     while ($true) {
         $client = $listener.AcceptTcpClient()
-        Handle-Client -Client $client -LocalAddress $binding.Address -PrefixLength $binding.PrefixLength
+        $shell = [System.Management.Automation.PowerShell]::Create()
+        $shell.RunspacePool = $pool
+        [void]$shell.AddCommand("Handle-Client")
+        [void]$shell.AddParameter("Client", $client)
+        [void]$shell.AddParameter("LocalAddress", $binding.Address)
+        [void]$shell.AddParameter("PrefixLength", $binding.PrefixLength)
+        [void]$workers.Add([pscustomobject]@{ Shell = $shell; Async = $shell.BeginInvoke() })
+
+        for ($i = $workers.Count - 1; $i -ge 0; $i--) {
+            if ($workers[$i].Async.IsCompleted) {
+                try { $workers[$i].Shell.EndInvoke($workers[$i].Async) } catch {}
+                $workers[$i].Shell.Dispose()
+                $workers.RemoveAt($i)
+            }
+        }
     }
 } catch {
     Write-Error ("スマホサーバーを起動できませんでした: " + $_.Exception.Message)
@@ -405,5 +477,8 @@ try {
 } finally {
     if ($started) {
         $listener.Stop()
+    }
+    if ($null -ne $pool) {
+        $pool.Close()
     }
 }

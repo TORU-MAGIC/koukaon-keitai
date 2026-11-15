@@ -4,15 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#101820">
+  <meta name="format-detection" content="telephone=no">
   <title>かんたん効果音リモコン</title>
   <style>
     :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101820; color: #f5f7fa; }
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html { -webkit-text-size-adjust: 100%; }
     body { max-width: 760px; margin: 0 auto; padding: 18px 14px calc(90px + env(safe-area-inset-bottom)); }
     h1 { margin: 0 0 6px; font-size: 26px; }
     p { color: #bac6d2; }
     button, select, input { min-height: 48px; border: 0; border-radius: 10px; font: inherit; }
-    button { padding: 10px 15px; background: #293947; color: white; font-weight: 700; touch-action: manipulation; }
+    button { padding: 10px 15px; background: #293947; color: white; font-weight: 700; touch-action: manipulation; -webkit-appearance: none; appearance: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
     button:disabled { opacity: .45; }
     input { display: block; width: 100%; margin-top: 6px; padding: 10px 12px; border: 1px solid #557080; background: #0d141a; color: white; font-size: 16px; }
     input:focus { outline: 3px solid #42c6cc; }
@@ -44,7 +46,7 @@
     <p id="last" class="help">最後の入力：なし</p>
     <label for="capture" class="help">リモコン入力（キー登録後、ここにフォーカスがある状態で押します）</label>
     <input id="capture" type="text" inputmode="none" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="リモコン入力テスト">
-    <p class="help">「キー登録」→リモコンのボタンを押します。音量ボタンはiPhoneが処理するため登録できません。</p>
+    <p class="help">「キー登録」→リモコンのボタンを押します。音量ボタンはiPhoneが処理するため登録できません。本番中は「設定 → 画面表示と明るさ → 自動ロック → なし」にしてください（画面が消えるとリモコンが効きません）。</p>
   </header>
   <main id="list" aria-label="効果音"></main>
 
@@ -74,6 +76,9 @@
       let learning = -1;
       let learningTimer;
       let audioContext;
+      let keepAlive = null;
+      let keepAliveWanted = false;
+      let audioWasStopped = false;
 
       try {
         const saved = JSON.parse(localStorage.getItem(storageKey) || "[]");
@@ -93,7 +98,10 @@
         try { localStorage.setItem(sourceStorageKey, JSON.stringify(effects.map((effect) => effect.file))); }
         catch (_) {}
       }
-      function save() { localStorage.setItem(storageKey, JSON.stringify(effects.map((effect) => effect.key))); }
+      function save() {
+        try { localStorage.setItem(storageKey, JSON.stringify(effects.map((effect) => effect.key))); }
+        catch (_) {}
+      }
       function render() {
         list.innerHTML = effects.map((effect, i) => `
           <section class="row" data-index="${i}">
@@ -146,21 +154,83 @@
       function getAudioContext() {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         if (!AudioContextClass) throw new Error("このブラウザでは効果音を再生できません");
-        audioContext ||= new AudioContextClass();
+        if (!audioContext) {
+          audioContext = new AudioContextClass();
+          // iPhoneは電話・Siri・画面ロックなどで音が止まる(interrupted)ので、状態を監視する
+          audioContext.onstatechange = () => {
+            if (audioContext.state === "running") {
+              if (audioWasStopped) {
+                audioWasStopped = false;
+                status.textContent = "音が復帰しました";
+              }
+            } else {
+              audioWasStopped = true;
+              status.textContent = "音が一時停止しています。画面をタップすると再開します";
+            }
+          };
+        }
         return audioContext;
+      }
+      // iPhoneのマナーモード(消音スイッチ)でも鳴らし、リモコンのメディアキーを受け取れるようにする
+      function makeSilentWavUrl() {
+        const sampleRate = 8000;
+        const samples = sampleRate;
+        const buffer = new ArrayBuffer(44 + samples * 2);
+        const view = new DataView(buffer);
+        const text = (offset, value) => { for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i)); };
+        text(0, "RIFF"); view.setUint32(4, 36 + samples * 2, true); text(8, "WAVE"); text(12, "fmt ");
+        view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+        view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+        text(36, "data"); view.setUint32(40, samples * 2, true);
+        return URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
+      }
+      function startKeepAlive() {
+        try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (_) {}
+        try {
+          if (!keepAlive) {
+            keepAlive = new Audio();
+            keepAlive.src = makeSilentWavUrl();
+            keepAlive.loop = true;
+            keepAlive.setAttribute("playsinline", "");
+            keepAlive.addEventListener("pause", () => {
+              if (keepAliveWanted && !document.hidden) keepAlive.play().catch(() => {});
+            });
+          }
+          keepAliveWanted = true;
+          if (keepAlive.paused) keepAlive.play().catch(() => {});
+        } catch (_) {}
+      }
+      function tryResume() {
+        if (audioContext && audioContext.state !== "running") audioContext.resume().catch(() => {});
+        if (keepAliveWanted && keepAlive && keepAlive.paused) keepAlive.play().catch(() => {});
       }
       async function enableAudio() {
         const context = getAudioContext();
-        if (context.state !== "running") await context.resume();
+        if (context.state !== "running") {
+          // iPhoneではresume()が応答しないことがあるので、待ちすぎない
+          await Promise.race([
+            context.resume().catch(() => {}),
+            new Promise((resolve) => setTimeout(resolve, 1500))
+          ]);
+        }
+        if (context.state !== "running") throw new Error("音が停止しています。画面の「音を準備する」をタップしてください");
         return context;
+      }
+      // 古いiOS(promise版decodeAudioData非対応)でも動くようにする
+      function decode(context, data) {
+        return new Promise((resolve, reject) => {
+          const result = context.decodeAudioData(data, resolve, reject);
+          if (result && typeof result.then === "function") result.then(resolve, reject);
+        });
       }
       function loadEffect(sound, context) {
         if (!sound.bufferPromise) {
           sound.bufferPromise = (async () => {
-            if (sound.file) return context.decodeAudioData(await sound.file.arrayBuffer());
+            if (sound.file) return decode(context, await sound.file.arrayBuffer());
             const response = await fetch(sound.url);
             if (!response.ok) throw new Error(`${sound.name}を読み込めません`);
-            return context.decodeAudioData(await response.arrayBuffer());
+            return decode(context, await response.arrayBuffer());
           })().catch((error) => {
             sound.bufferPromise = null;
             throw error;
@@ -169,6 +239,7 @@
         return sound.bufferPromise;
       }
       async function prepare() {
+        startKeepAlive();
         try {
           const context = await enableAudio();
           await Promise.all(effects.map((effect) => loadEffect(effect.sound, context)));
@@ -338,10 +409,14 @@
         const mediaKeys = { play: "MediaPlayPause", pause: "MediaPlayPause", nexttrack: "MediaTrackNext", previoustrack: "MediaTrackPrevious" };
         for (const [action, name] of Object.entries(mediaKeys)) {
           try { navigator.mediaSession.setActionHandler(action, () => {
+            tryResume();
             receiveKey(name);
           }); } catch (_) {}
         }
       }
+      // 画面タップ・キー入力・アプリ復帰のたびに、止まっている音を再開する
+      ["touchend", "click", "keydown"].forEach((type) => document.addEventListener(type, tryResume, { capture: true, passive: true }));
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) tryResume(); });
     })();
   </script>
 </body>
